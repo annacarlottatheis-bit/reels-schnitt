@@ -185,11 +185,16 @@ def _setzen(text, platz, groesse):
     return zeilen, g
 
 
-def ass_bauen(karten, pfad, breite, hoehe):
+def ass_bauen(karten, pfad, breite, hoehe, links=False):
     """Aus Zeiten und Text eine Untertiteldatei im Look bauen."""
     g = max(28, int(GROESSE * hoehe / 1920))
     rand = max(24, int(RAND * breite / 1080))
     unterkante = int(hoehe - GRUNDLINIE * hoehe / 1920)
+    fett = 0
+    if links:
+        # Wie ihre MOFU-Reels: fett, groesser, links, auf Brusthoehe
+        g = int(88 * hoehe / 1920); rand = int(100 * breite / 1080)
+        unterkante = int(hoehe - 1130 * hoehe / 1920); fett = -1
     platz = breite - 2 * rand
     kopf = f"""[Script Info]
 ScriptType: v4.00+
@@ -201,7 +206,7 @@ YCbCr Matrix: TV.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: SR,{FAMILIE},{g},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,2,{rand},{rand},{unterkante},1
+Style: SR,{FAMILIE},{g},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,{fett},0,0,0,100,100,0,0,1,0,0,{1 if links else 2},{rand},{rand},{unterkante},1
 
 [Events]
 Format: Layer, Start, End, Style, MarginL, MarginR, MarginV, Effect, Text
@@ -228,7 +233,7 @@ Format: Layer, Start, End, Style, MarginL, MarginR, MarginV, Effect, Text
     return pfad
 
 
-def schrift_einbrennen(quelle, karten, ziel, crf=20, band=True):
+def schrift_einbrennen(quelle, karten, ziel, crf=20, band=True, links=False):
     """Schrift ueber ein fertiges Video legen.
 
     `band` legt den weichen Verlauf darunter. Fuer Reels bleibt er aus —
@@ -238,7 +243,7 @@ def schrift_einbrennen(quelle, karten, ziel, crf=20, band=True):
     b, h, _ = masse(quelle)
     with tempfile.TemporaryDirectory() as tmp:
         schrift = schriftsatz(f"{tmp}/schrift")
-        ass = ass_bauen(karten, f"{tmp}/unter.ass", b, h)
+        ass = ass_bauen(karten, f"{tmp}/unter.ass", b, h, links=links)
         gemeinsam = ["-map", "[v]", "-map", "0:a?", "-c:v", "libx264",
                      "-preset", "medium", "-crf", str(crf), "-pix_fmt", "yuv420p",
                      "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", ziel]
@@ -257,7 +262,7 @@ def schrift_einbrennen(quelle, karten, ziel, crf=20, band=True):
 
 # ------------------------------------------------------------ Transkript
 
-def transkribieren(quelle, sprache="de", tmp=None):
+def transkribieren(quelle, sprache="de", tmp=None, ml=46):
     """Lokal mit whisper.cpp. -mc 0 ist Pflicht, sonst dreht es bei langem
     Ton in Wiederholungsschleifen. VAD setzt die Zeiten auf echte Sprache."""
     tmp = tmp or tempfile.mkdtemp()
@@ -269,7 +274,7 @@ def transkribieren(quelle, sprache="de", tmp=None):
           "-l", sprache, "-t", "8", "-mc", "0", "-sns",
           "--vad", "--vad-model", f"{WHISPER}/models/ggml-silero-v5.1.2.bin",
           "--vad-min-silence-duration-ms", "300", "--vad-speech-pad-ms", "150",
-          "-ml", "46", "-sow", "--output-srt", "--output-file", f"{tmp}/t"])
+          "-ml", str(ml), "-sow", "--output-srt", "--output-file", f"{tmp}/t"])
     karten = []
     for block in open(f"{tmp}/t.srt", encoding="utf-8").read().strip().split("\n\n"):
         z = block.strip().split("\n")
@@ -305,15 +310,40 @@ def befehl_text(a):
     print(a.ziel)
 
 
+def woerter_gruppieren(karten, n=3, zeichen=18):
+    """Einzelwoerter zu kurzen Einblendungen wie in ihren MOFU-Reels:
+    ein bis drei Woerter, nie ueber `zeichen` Zeichen, Satzende bricht."""
+    raus, akt = [], None
+    for k in karten:
+        w = k["text"].strip()
+        if not w:
+            continue
+        if akt and (len(akt["w"]) >= n or len(" ".join(akt["w"] + [w])) > zeichen
+                    or akt["w"][-1][-1:] in ".?!,"):
+            raus.append({"von": akt["von"], "bis": akt["bis"], "text": " ".join(akt["w"])}); akt = None
+        if akt is None:
+            akt = {"von": k["von"], "bis": k["bis"], "w": [w]}
+        else:
+            akt["w"].append(w); akt["bis"] = k["bis"]
+    if akt:
+        raus.append({"von": akt["von"], "bis": akt["bis"], "text": " ".join(akt["w"])})
+    for a, b in zip(raus, raus[1:]):
+        a["bis"] = max(a["bis"], min(b["von"], a["bis"] + 0.4))
+    return raus
+
+
 def befehl_untertitel(a):
     with tempfile.TemporaryDirectory() as tmp:
         print("1 · lokal transkribieren")
-        karten = transkribieren(a.quelle, a.sprache, tmp)
+        if a.woerter:
+            karten = woerter_gruppieren(transkribieren(a.quelle, a.sprache, tmp, ml=1), n=a.woerter)
+        else:
+            karten = transkribieren(a.quelle, a.sprache, tmp)
         print(f"2 · {len(karten)} Einblendungen einbrennen")
         if a.nur_text:
             json.dump(karten, open(a.nur_text, "w"), ensure_ascii=False, indent=1)
             print(a.nur_text); return
-        schrift_einbrennen(a.quelle, karten, a.ziel, band=not a.ohne_band)
+        schrift_einbrennen(a.quelle, karten, a.ziel, band=not a.ohne_band and not a.woerter, links=bool(a.woerter))
     print(a.ziel)
 
 
@@ -342,6 +372,8 @@ def main():
                    help="nur die Textdatei schreiben, nichts rendern")
     v.add_argument("--ohne-band", dest="ohne_band", action="store_true",
                    help="kein Verlauf hinter der Schrift, wie in den Reels")
+    v.add_argument("--woerter", type=int, default=0,
+                   help="Stil der MOFU-Reels: 1 bis N Woerter, links, ohne Band (3 empfohlen)")
     v.set_defaults(f=befehl_untertitel)
 
     a = p.parse_args()
